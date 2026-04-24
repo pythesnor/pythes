@@ -72,11 +72,11 @@ jobs:
           "
           
       - name: Keep tunnel alive
-        run: sleep 600
+        run: sleep 919
 
       - name: Wait before next run
         if: success()
-        run: sleep 300
+        run: sleep 153
 
       - name: Re-trigger next run
         if: success()
